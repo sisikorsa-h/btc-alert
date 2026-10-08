@@ -1,0 +1,80 @@
+name: BTC 千位关口提醒
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "发送测试消息"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: btc-alert
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check price
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST: ${{ inputs.test && '1' || '0' }}
+        run: |
+          cat > alert.py <<'PY'
+          import json, os, sys, urllib.request, datetime
+
+          STATE = "state.json"
+          STEP = 1000
+
+          def get_price():
+              req = urllib.request.Request("https://api.coinbase.com/v2/prices/BTC-USD/spot",
+                                           headers={"User-Agent": "btc-alert"})
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  return float(json.load(r)["data"]["amount"])
+
+          def send(text):
+              token = os.environ["TELEGRAM_BOT_TOKEN"]; chat = os.environ["TELEGRAM_CHAT_ID"]
+              data = json.dumps({"chat_id": chat, "text": text}).encode()
+              req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage",
+                                           data=data, headers={"Content-Type": "application/json"})
+              urllib.request.urlopen(req, timeout=20).read()
+
+          def main():
+              price = get_price()
+              now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+              ts = now.strftime("%m-%d %H:%M")
+              if os.environ.get("TEST") == "1":
+                  send(f"✅ BTC 提醒测试成功\nBTC 现价 ${price:,.0f}（{ts} 北京时间）")
+                  return
+              prev = None
+              if os.path.exists(STATE):
+                  prev = json.load(open(STATE)).get("price")
+              if prev is not None and int(prev // STEP) == int(price // STEP):
+                  return
+              json.dump({"price": price, "time": ts}, open(STATE, "w"))
+              if prev is None:
+                  return
+              old_b, new_b = int(prev // STEP), int(price // STEP)
+              pct = (price - prev) / prev * 100
+              if new_b < old_b:
+                  levels = [b * STEP for b in range(old_b, new_b, -1)]
+                  head = "🔻 BTC 跌破 " + "、".join(f"{l:,}" for l in levels)
+              else:
+                  levels = [b * STEP for b in range(old_b + 1, new_b + 1)]
+                  head = "🔺 BTC 站上 " + "、".join(f"{l:,}" for l in levels)
+              send(f"{head}\n现价 ${price:,.0f}（上次记录 ${prev:,.0f}，{pct:+.2f}%）\n{ts} 北京时间")
+
+          if __name__ == "__main__":
+              main()
+          PY
+          python3 alert.py
+      - name: Save state
+        run: |
+          git config user.name btc-alert-bot
+          git config user.email btc-alert-bot@users.noreply.github.com
+          [ -f state.json ] || exit 0
+          git add state.json
+          git diff --cached --quiet || (git commit -m "state" -q && git push -q)
