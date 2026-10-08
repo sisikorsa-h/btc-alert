@@ -1,7 +1,7 @@
 name: BTC 千位关口提醒
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "5,35 * * * *"
   workflow_dispatch:
     inputs:
       test:
